@@ -25,6 +25,8 @@ frozenlist==1.6.0
 fsspec==2025.5.1
 genai==2.1.0
 generativeai==0.0.1
+google
+google-generativeai
 google-ai-generativelanguage==0.6.15
 google-api-core==2.25.0rc1
 google-api-python-client==2.170.0
