@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 # ─── Domain enums ─────────────────────────────────────────────
 CuisineType = Literal[
-    "Any", "Italian", "Mexican", "Korean", "Dessert", "American"
+    "Any", "American", "Chinese", "French", "Indian", "Japanese", "Korean", "Mediterranean", "Mexican", "Middle Eastern", "Thai", "Dessert"
 ]
 AudienceType = Literal[
     "Everyone",
