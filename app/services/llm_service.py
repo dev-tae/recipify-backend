@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib, json, re
+import traceback
+import math
+import re
+from typing import Iterable
 from typing import Literal, Optional, List, Union
 
 from async_lru import alru_cache
 from fastapi import HTTPException, status
-import google.genai as genai
-from google.genai.types import GenerationConfig # Import GenerationConfig
-
+from google import genai                               # ✅ new SDK entrypoint
+from google.genai import errors as genai_errors        # ✅ error classes
+from google.genai import types                         # ✅ GenerateContentConfig, etc.
 
 from core.config import get_settings
 from app.schemas.recipe_schemas import (  # ← NEW
@@ -19,6 +24,7 @@ from app.schemas.recipe_schemas import (  # ← NEW
     RECIPE_SCHEMA,
 )
 
+_WORD = re.compile(r"[a-z0-9]+")
 # ─── 2. Prompt (identical wording to the FE) ──────────────────
 
 BABY_RULES: dict[str, str] = {
@@ -146,63 +152,45 @@ Desired servings: {servings}
 Respond with ONLY the JSON object.
 """.strip()
 
-
-# ─── 3. Gemini client with response_schema & JSON lock ───────
 settings = get_settings()
 
-# --- Configure Gemini API Key Globally (once) ---
+# ─── Client init (new SDK) ───────────────────────────────────
+_client: genai.Client | None = None
+try:
+    # Picks up GEMINI_API_KEY from env or use explicit:
+    _client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    print("Gemini client initialized.")
+except Exception as e:
+    print(f"ERROR: Failed to init Gemini client: {e}")
+    _client = None
 
-if settings.GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=settings.GEMINI_API_KEY)
-        print("Gemini API Key configured successfully.")
-    except Exception as e:
-        print(f"ERROR: Failed to configure Gemini API Key: {e}")
-        # Decide how to handle this - raise error, log, etc.
-        # If key is essential, app might not be able to start/function.
-else:
-    print("WARNING: GEMINI_API_KEY not found in settings. Gemini features will be unavailable.")
-
-# --- Model Initialization ---
-# Initialize the model instance after genai.configure has been called.
-# This can be a global instance in this module if settings don't change per request.
-
-_gemini_model = None
-if settings.GEMINI_API_KEY:
-    try:
-        # Create a GenerationConfig instance
-        current_generation_config = GenerationConfig(
-            temperature=settings.GEMINI_TEMP,
-            response_mime_type="application/json",
-            response_schema=RECIPE_SCHEMA,  # Pass the Pydantic model class here
-        )
-
-        _gemini_model = genai.GenerativeModel(
-            model_name=settings.GEMINI_MODEL_NAME,
-            generation_config=current_generation_config,  # Pass the instance
-            # safety_settings=... # You can also configure safety settings here if needed
-        )
-        print(f"Gemini model '{settings.GEMINI_MODEL_NAME}' initialized.")
-    except Exception as e:
-        print(f"ERROR: Failed to initialize Gemini model '{settings.GEMINI_MODEL_NAME}': {e}")
-        _gemini_model = None  # Ensure it's None if initialization fails
-else:
-    print("WARNING: Gemini model name or API key missing. Model not initialized.")
-
+# Strip ```json fences defensively
 _fence = re.compile(r"^```(\w+)?\s*\n?(.*?)\n?```$", re.S)
-
 
 # ─── 4. Tiny helper: hash prompt to stable cache key ──────────
 def _hash_key(*parts) -> str:
     blob = json.dumps(parts, sort_keys=True, default=list).encode()
     return hashlib.sha256(blob).hexdigest()
 
-
 # ─── 5. Async in-memory TTL cache (async-lru) ────────────────
 @alru_cache(maxsize=settings.GEMINI_CACHE_MAXSIZE, ttl=settings.GEMINI_CACHE_TTL)
 async def _cached_llm_call(cache_key: str, prompt: str):
-    return await _gemini_model.generate_content_async(prompt)
-
+    """
+    Run the sync generate_content call in a worker thread so we don't block the event loop.
+    """
+    if _client is None:
+        raise HTTPException(500, "Gemini client not initialized (check GEMINI_API_KEY)")
+    cfg = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=RECIPE_SCHEMA,
+        temperature=settings.GEMINI_TEMP,
+    )
+    return await asyncio.to_thread(
+        _client.models.generate_content,
+        model=settings.GEMINI_MODEL_NAME,
+        contents=prompt,
+        config=cfg,
+    )
 
 # ─── 6. Public API: single-shot call (used by HTTP route) ────
 async def generate_recipe_from_ingredients(
@@ -215,35 +203,145 @@ async def generate_recipe_from_ingredients(
     if not settings.GEMINI_API_KEY:
         raise HTTPException(500, "Gemini API key missing")
 
+    print(ingredients, cuisine, audience, servings, titles_to_avoid)
+    avoid_list = titles_to_avoid or []
     prompt = PROMPT_TEMPLATE(ingredients, cuisine, audience, servings, titles_to_avoid)
     cache_key = _hash_key(ingredients, cuisine, audience, servings, titles_to_avoid)
 
-    try:
-        response = await _cached_llm_call(cache_key, prompt)
-    except Exception as e:
-        print(f"DEBUG_LLM_ERROR: Original exception from Gemini call: {type(e).__name__} - {str(e)}")  # <<< ADD THIS
-        msg = str(e).lower()
-        if "quota" in msg or "rate" in msg:
-            raise HTTPException(429, "LLM quota exceeded")
-        if "api key" in msg:
-            raise HTTPException(500, "Invalid Gemini API key")
-        raise HTTPException(502, f"Gemini error: {e}")
+    attempt_temps = [settings.GEMINI_TEMP, min(settings.GEMINI_TEMP + 0.2, 1.1), min(settings.GEMINI_TEMP + 0.4, 1.2)]
+    last_reason = None
 
-    raw = response.text.strip()
-    m = _fence.match(raw)
-    if m:
-        raw = m.group(2).strip()
+    MAX_ATTEMPTS = 3
+    last_err: Optional[str] = None
 
-    parsed = json.loads(raw)  # guaranteed syntactically valid
-    # Runtime validation -> either Recipe or RecipeError
-    if "error" in parsed:
-        return RecipeError(**parsed)
-    return Recipe(**parsed)
+    def _raise_http(status: int, msg: str):
+        raise HTTPException(status_code=status, detail=msg)
 
+    def _summarize_exc(e: Exception) -> str:
+        cls = e.__class__.__name__
+        status_code = getattr(e, "status", None) or getattr(e, "status_code", None)
+        reason = getattr(e, "reason", None)
+        extra = getattr(e, "message", None) or getattr(e, "detail", None) or ""
+        return f"{cls} status={status_code} reason={reason} msg={str(e)} extra={extra}".strip()
 
+    if _client is None:
+        print("DEBUG_LLM_ERROR: _client is None. Check GEMINI_API_KEY.")
+        _raise_http(500, "Gemini client not initialized (check API key)")
+
+    for i, temp in enumerate(attempt_temps, start=1):
+        cache_key = f"{cache_key}:{i}:{temp:.2f}"
+        try:
+            cfg = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=RECIPE_SCHEMA,
+                temperature=temp,
+            )
+            response = await asyncio.to_thread(
+                _client.models.generate_content,
+                model=settings.GEMINI_MODEL_NAME,
+                contents=prompt,
+                config=cfg,
+            )
+        except genai_errors.RateLimitError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(429, "LLM rate limit/quota exceeded")
+        except genai_errors.AuthenticationError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(401, "Invalid or missing Gemini API key")
+        except genai_errors.PermissionDeniedError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(403, "Gemini permission denied (project/org)")
+        except genai_errors.InvalidRequestError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(400, f"Gemini invalid request: {e}")
+        except genai_errors.SafetyError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(412, "Blocked by safety filters for this prompt")
+        except genai_errors.NotFoundError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(404, "Gemini resource not found (check model name)")
+        except genai_errors.APIConnectionError as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(503, "Upstream connectivity issue reaching Gemini")
+        except genai_errors.APIStatusError as e:
+            sc = getattr(e, "status_code", None) or getattr(e, "status", 502)
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            _raise_http(int(sc) if isinstance(sc, int) else 502, f"Gemini error: {e}")
+        except Exception as e:
+            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+            traceback.print_exc()
+            _raise_http(502, f"Gemini error (unclassified): {e}")
+
+        raw = (response.text or "").strip()
+        m = _fence.match(raw)
+        if m:
+            raw = m.group(2).strip()
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as e:
+            last_reason = f"bad json: {e}"
+            continue
+
+        # Model-reported error passes through
+        if isinstance(parsed, dict) and "error" in parsed:
+            return RecipeError(**parsed)
+
+        # Validate + duplicate guard
+        try:
+            recipe = Recipe(**parsed)
+        except Exception as e:
+            last_err = f"Schema validation failed: {e}"
+            continue
+
+        dup, hit, score = too_similar(recipe.title, avoid_list, thresh=0.62)
+        tech_close, cand_labels = tech_too_close(recipe.title, avoid_list)
+
+        if dup or tech_close:
+            print(f"DIVERSE_RETRY[{i}/{len(attempt_temps)}]: '{recipe.title}' ~ '{hit}' "
+                  f"(sim={score:.2f}, tech_close={tech_close}, labels={cand_labels}); temp={temp}")
+            last_reason = f"similar to '{hit}' (sim={score:.2f}) or tech-close={tech_close}"
+            continue
+
+        # ✅ passes diversity gates
+        return recipe
+    # All attempts failed → return a polite error so FE can auto re-roll once
+    return RecipeError(error=f"Could not generate a sufficiently different recipe title. {last_reason or ''}".strip())
 # ─── 7. Streaming generator (Server-Sent Events) ─────────────
-async def stream_recipe_chunks(*args, **kwargs):
-    prompt = PROMPT_TEMPLATE(*args, **kwargs)
-    stream = await _gemini_model.generate_content_stream_async(prompt)
-    async for part in stream:
-        yield {"event": "chunk", "data": part.text}
+async def stream_recipe_chunks(
+        ingredients: List[str],
+        cuisine: CuisineType,
+        audience: AudienceType,
+        servings: int,
+        titles_to_avoid: Optional[List[str]] = None,
+):
+    """
+    Simple async generator that *collects* streamed chunks on a worker thread
+    and yields them back to the client. (If you want true live streaming,
+    switch to a background task with an asyncio.Queue.)
+    """
+    if _client is None:
+        raise HTTPException(500, "Gemini client not initialized")
+
+    prompt = PROMPT_TEMPLATE(ingredients, cuisine, audience, servings, titles_to_avoid)
+    cfg = types.GenerateContentConfig(
+        response_mime_type="application/json",
+        response_schema=RECIPE_SCHEMA,
+        temperature=settings.GEMINI_TEMP,
+    )
+
+    def _collect_stream():
+        chunks = []
+        for part in _client.models.generate_content_stream(
+            model=settings.GEMINI_MODEL_NAME,
+            contents=prompt,
+            config=cfg,
+        ):
+            if part.text:
+                chunks.append(part.text)
+        return chunks
+
+    # Run the stream collection off-thread, then yield chunks
+    chunks = await asyncio.to_thread(_collect_stream)
+    for c in chunks:
+        yield {"event": "chunk", "data": c}
