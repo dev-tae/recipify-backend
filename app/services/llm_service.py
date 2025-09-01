@@ -52,6 +52,108 @@ GENERAL_BABY_INSTRUCTIONS = """
 - **Forbidden Items:** NO honey (under 1 year). NO whole nuts or seeds. NO cow's milk as main drink (under 1 year; small amounts in cooking okay if appropriate). NO highly processed foods.
 """.strip()
 
+def _normalize_title(t: str) -> list[str]:
+    tokens = _WORD.findall(t.lower())
+    # Optionally drop common stopwords to make matching stricter
+    stop = {"the","a","an","of","for","and","with","to","on","in","easy","simple","quick"}
+    return [w for w in tokens if w not in stop]
+
+def _token_jaccard(a: Iterable[str], b: Iterable[str]) -> float:
+    sa, sb = set(a), set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+def _too_similar(candidate: str, avoid: list[str], threshold: float = 0.6) -> tuple[bool, str, float]:
+    cand = _normalize_title(candidate)
+    best_score, best_title = 0.0, ""
+    for t in avoid:
+        score = _token_jaccard(cand, _normalize_title(t))
+        if score > best_score:
+            best_score, best_title = score, t
+    return (best_score >= threshold, best_title, best_score)
+
+def _norm_words(s: str) -> list[str]:
+    stop = {"the","a","an","of","for","and","with","to","on","in","easy","simple","quick","creamy","savory","crispy"}
+    return [w for w in _WORD.findall(s.lower()) if w not in stop]
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b: return 0.0
+    return len(a & b) / len(a | b)
+
+def _trigrams(s: str) -> dict[str, int]:
+    t = s.lower().replace(" ", "_")
+    return { t[i:i+3]: t.count(t[i:i+3]) for i in range(max(0, len(t)-2)) }
+
+def _cosine(a: dict[str,int], b: dict[str,int]) -> float:
+    if not a or not b: return 0.0
+    dot = sum(a.get(k,0)*b.get(k,0) for k in set(a)|set(b))
+    na = math.sqrt(sum(v*v for v in a.values()))
+    nb = math.sqrt(sum(v*v for v in b.values()))
+    return dot/(na*nb) if na and nb else 0.0
+
+def _levenshtein(a: str, b: str) -> float:
+    # returns similarity in [0,1]
+    if a == b: return 1.0
+    la, lb = len(a), len(b)
+    if la == 0 or lb == 0: return 0.0
+    dp = list(range(lb+1))
+    for i, ca in enumerate(a, 1):
+        prev, dp[0] = dp[0], i
+        for j, cb in enumerate(b, 1):
+            prev, dp[j] = dp[j], min(
+                dp[j]+1,
+                dp[j-1]+1,
+                prev + (ca != cb)
+            )
+    dist = dp[lb]
+    return 1.0 - dist / max(la, lb)
+
+_TECH_BUCKETS = {
+    "skillet": {"skillet","pan-seared","pan","stir-fry","stirfry","sauté","saute","sear"},
+    "grill": {"grill","grilled","skewer","broil","broiler"},
+    "bake": {"bake","baked","roast","roasted","sheet-pan","sheetpan"},
+    "mash": {"mash","puree","purée","whip"},
+    "salad": {"salad","bowl","cold"},
+    "soup": {"soup","stew","braise"},
+    "wrap": {"wrap","taco","sandwich","pita"},
+}
+
+def _tech_labels(title: str) -> set[str]:
+    words = set(_norm_words(title))
+    labels = set()
+    for label, keys in _TECH_BUCKETS.items():
+        if words & keys:
+            labels.add(label)
+    return labels or {"unspecified"}
+
+def title_similarity(a: str, b: str) -> float:
+    # blend of three views; weight character & token overlap more
+    wa, wb = set(_norm_words(a)), set(_norm_words(b))
+    j = _jaccard(wa, wb)
+    c = _cosine(_trigrams(a), _trigrams(b))
+    l = _levenshtein(a.lower(), b.lower())
+    return 0.45*c + 0.45*j + 0.10*l  # weighted score in [0,1]
+
+def too_similar(candidate: str, avoid: list[str], thresh: float = 0.62) -> tuple[bool,str,float]:
+    best, hit = 0.0, ""
+    for t in avoid:
+        s = title_similarity(candidate, t)
+        if s > best:
+            best, hit = s, t
+    return (best >= thresh, hit, best)
+
+def tech_too_close(candidate: str, avoid: list[str]) -> tuple[bool, set[str]]:
+    cand = _tech_labels(candidate)
+    # if every avoided title shares same single label set, consider “too close”
+    avoided = [_tech_labels(t) for t in avoid if t]
+    if not avoided:
+        return (False, cand)
+    # if candidate's label set is subset of a common mode, mark close
+    common = set.intersection(*avoided) if avoided else set()
+    if common and cand & common:
+        return (True, cand)
+    return (False, cand)
 
 def PROMPT_TEMPLATE(
         ingredients_list: list[str],
@@ -141,7 +243,6 @@ If a recipe cannot be generated due to constraints:
 6.  **Recipe Variety:** {recipe_variety_content}
 
 7.  **No External Text:** Absolutely NO text or characters outside the main JSON object.
-
 ---
 User provided ingredients: "{ingredients_string}"
 Selected cuisine: "{cuisine}"
