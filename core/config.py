@@ -17,7 +17,7 @@ GEMINI_API_KEY_CONFIG = os.environ.get("GEMINI_API_KEY")
 _supabase_backend_client: AsyncClient = None # Rename to indicate it's "private" to this module
 
 class Settings(BaseSettings):
-    GEMINI_MODEL_NAME: str = Field(default="gemini-1.5-flash-latest")
+    GEMINI_MODEL_NAME: str = Field(default="gemini-2.5-flash")
     GEMINI_TEMP: float = Field(default=0.6, gt=0.0, le=2.0)
 
     GEMINI_API_KEY: str = Field(..., env="GEMINI_API_KEY")
