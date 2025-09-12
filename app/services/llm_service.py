@@ -156,93 +156,89 @@ def tech_too_close(candidate: str, avoid: list[str]) -> tuple[bool, set[str]]:
     return (False, cand)
 
 def PROMPT_TEMPLATE(
-        ingredients_list: list[str],
-        cuisine: str,
-        audience: str,
-        servings: int,
-        all_titles_to_avoid: list[str] | None = None,
+    ingredients_list: list[str],
+    cuisine: str,
+    audience: str,
+    servings: int,
+    all_titles_to_avoid: list[str] | None = None,
 ) -> str:
     ingredients_string = ", ".join(ingredients_list)
     assumed_staples = "salt, black pepper, water, neutral cooking oil (e.g., vegetable, canola)"
 
     audience_specific_instructions = BABY_RULES.get(audience, "Standard seasoning and preparation.")
     if audience.startswith("Baby"):
-        audience_specific_instructions = (
-                GENERAL_BABY_INSTRUCTIONS + "\n" + audience_specific_instructions
-        )
+        audience_specific_instructions = GENERAL_BABY_INSTRUCTIONS + "\n" + audience_specific_instructions
 
+    # Cuisine instructions (short + hard rule language)
     if cuisine != "Any":
         cuisine_instructions = (
-            f'The desired cuisine style is **{cuisine}**. Strive to create a recipe that authentically reflects this style, using appropriate flavor profiles and techniques.'
+            f"**Cuisine:** {cuisine}. Produce a dish that is plausibly served in this cuisine, using its typical seasonings/techniques.\n"
+            "HARD RULE: If the provided ingredients (plus assumed staples only) do not include clear cuisine anchors, "
+            "return the error JSON instead of producing a 'style' or loose interpretation.\n"
+            "Examples of anchors (non-exhaustive): Korean → gochujang/gochugaru/soy/garlic/sesame; "
+            "Thai → fish sauce/lime/tamarind/chili/garlic/basil; Italian → olive oil/garlic/tomato/basil/oregano; "
+            "Mexican → chilies/lime/cilantro/cumin; Indian → garam masala/turmeric/cumin/coriander/ginger/garlic."
         )
     else:
         cuisine_instructions = (
-            "The user has not specified a particular cuisine. You have flexibility, but ensure the dish is coherent and appealing based on the provided ingredients."
+            "No specific cuisine requested. Create a coherent, appealing recipe based on the provided ingredients."
         )
 
+    # Variety block
     if all_titles_to_avoid and len(all_titles_to_avoid) > 0:
         titles_to_avoid_string = '"' + "; ".join(all_titles_to_avoid) + '"'
         recipe_variety_content = (
-            f"To provide variety, please try to AVOID generating recipes that are very similar to these titles: {titles_to_avoid_string}\n"
-            "Guidance: Aim for a fresh culinary experience. If ingredients strongly point to one of these, or creativity is limited, you may still suggest it, but ideally, offer a different dish or a new angle. Prioritize novelty."
+            f"Title must be distinct from these: {titles_to_avoid_string}. Avoid reusing their distinctive adjectives."
         )
+        avoid_titles_line = f'Avoid these titles if possible: {titles_to_avoid_string}'
     else:
-        titles_to_avoid_string = "N/A"
-        recipe_variety_content = "No specific meals to avoid were provided. Generate freely."
-
-    avoid_titles_line = (
-        f'Avoid these titles if possible: {titles_to_avoid_string}' if all_titles_to_avoid and len(
-            all_titles_to_avoid) > 0 else ""
-    )
+        recipe_variety_content = "No title exclusions provided."
+        avoid_titles_line = ""
 
     return f"""
 You are "Recipify AI Chef".
-Your *entire response* MUST be *ONLY* a single JSON object. No other text, explanations, or conversational fluff before, after, or inside the JSON. Adhere strictly to JSON syntax.
+Your output MUST be exactly ONE JSON object matching the schema. No extra text before/after.
 
-### Expected JSON Output Structure:
-If successful:
-    {{
-      "title": "Recipe Title (e.g., 'Simple Chicken and Veggie Stir-fry')",
-      "description": "A short, appealing description of the dish (1-2 sentences).",
-      "prepTime": "e.g., '15 minutes'",
-      "cookTime": "e.g., '25 minutes'",
-      "servings": "e.g., '{servings} adult servings' or 'Approx. {servings} baby portions (6-8 months)'",
-      "ingredientsUsed": [
-        {{ "name": "Ingredient Name", "quantity": "Amount", "unit": "e.g., cups, grams, tbsp, or 'to taste' (if appropriate for audience)" }}
-      ],
-      "instructions": [
-        "Clear, step-by-step cooking instruction.",
-        "Another step..."
-      ],
-      "notes": "Optional: cooking tips, storage advice, simple variations using ONLY provided ingredients or assumed staples. Notes must be age-appropriate for babies/toddlers."
-    }}
+### Output Schema (must populate all success fields)
+{{
+  "title": "...",
+  "description": "...",
+  "prepTime": "...",
+  "cookTime": "...",
+  "servings": "...",
+  "ingredientsUsed": [{{ "name": "...", "quantity": "...", "unit": "..." }}],
+  "instructions": ["step 1", "step 2", "..."],
+  "notes": "Tips/substitutions/storage. For cuisine runs, include a short 'anchors used: ...' note."
+}}
 
-If a recipe cannot be generated due to constraints:
-    {{
-      "error": "A polite and clear message explaining why a recipe cannot be generated. E.g., 'The ingredients (e.g., only chili peppers) are not suitable for a baby food recipe.' or 'With just water and salt, I can't create a full recipe.'"
-    }}
+If you cannot produce a valid recipe: return {{ "error": "clear reason" }} as the ONLY JSON.
 
-### Recipe Generation Rules:
-1.  **Ingredients Source:**
-    *   Primarily use a subset or all of the user-provided ingredients: "{ingredients_string}".
-    *   **Assumed Staples:** You may assume the user has basic staples: **{assumed_staples}**.
-    *   **CRITICAL:** If your recipe *requires* any of these assumed staples for a standard preparation, you **MUST include them in the "ingredientsUsed" list** with appropriate quantities (e.g., "1 tsp salt", "2 tbsp oil"). Do NOT introduce other ingredients.
-    *   If a liquid base is needed (e.g., for a shake, soup) and not provided by user, 'Water' from assumed staples may be used if sensible, and MUST be listed in 'ingredientsUsed'.
+### Non-Negotiable Rules
+1) **Ingredients you may use:** ONLY a subset/all of: "{ingredients_string}" plus assumed staples: {assumed_staples}.
+   - If you use any staple, include it in "ingredientsUsed" with a quantity.
+   - Do NOT introduce any other ingredients.
+   - If a liquid base is needed and not provided, water (from staples) may be used and must be listed.
 
-2.  **Edibility & Sanity:** The recipe must be for an **edible dish** with **common and sensible ingredient combinations**. Avoid unsafe or bizarre pairings.
+2) **Cuisine Compliance**
+{cuisine_instructions}
+   - Do NOT label dishes as "<cuisine>-style" unless anchors are truly present.
+   - If anchors are missing, return the error JSON with a brief suggestion of 1–2 typical anchors.
 
-3.  **Sufficiency Check:** If provided ingredients (even with staples) are insufficient for ANY reasonable recipe (e.g., just "water"), nonsensical, or cannot form a coherent dish, respond with the error JSON.
+3) **Audience & Servings**
+Target audience: **{audience}**. Follow:
+{audience_specific_instructions}
+Desired servings: approximately **{servings}**; scale quantities and "servings" accordingly.
 
-4.  **Cuisine Style:** {cuisine_instructions}
+4) **Edibility & Safety**
+Produce a sensible, edible dish. Avoid unsafe/bizarre pairings. For babies: avoid salt/sugar/honey; prevent choking hazards; keep textures age-appropriate.
 
-5.  **Audience & Servings:**
-    *   Target Audience: **{audience}**. Adhere to the following guidelines:
-        {audience_specific_instructions}
-    *   Desired Servings: Approximately **{servings} serving(s)**. Adjust ingredient quantities and "servings" field accordingly. Note: A "serving" for babies/toddlers is smaller than an adult's.
+5) **Variety**
+{recipe_variety_content}
 
-6.  **Recipe Variety:** {recipe_variety_content}
+6) **Formatting**
+- Absolutely NO text outside the single JSON object.
+- Steps must be clear, sequential, and executable.
 
-7.  **No External Text:** Absolutely NO text or characters outside the main JSON object.
 ---
 User provided ingredients: "{ingredients_string}"
 Selected cuisine: "{cuisine}"
