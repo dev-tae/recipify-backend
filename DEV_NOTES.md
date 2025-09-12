@@ -50,5 +50,5 @@ export GEMINI_MODEL_NAME=gemini-2.5-flash-lite
 export GEMINI_TEMP=0.7
 
 # run
-uvicorn app.main:app --reload
+uvicorn main:app --reload
 # health: http://localhost:8000/healthz, readiness: /readyz
