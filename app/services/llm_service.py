@@ -339,31 +339,31 @@ async def generate_recipe_from_ingredients(
                 contents=prompt,
                 config=cfg,
             )
-        except genai_errors.RateLimitError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(429, "LLM rate limit/quota exceeded")
-        except genai_errors.AuthenticationError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(401, "Invalid or missing Gemini API key")
-        except genai_errors.PermissionDeniedError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(403, "Gemini permission denied (project/org)")
-        except genai_errors.InvalidRequestError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(400, f"Gemini invalid request: {e}")
-        except genai_errors.SafetyError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(412, "Blocked by safety filters for this prompt")
-        except genai_errors.NotFoundError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(404, "Gemini resource not found (check model name)")
-        except genai_errors.APIConnectionError as e:
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(503, "Upstream connectivity issue reaching Gemini")
-        except genai_errors.APIStatusError as e:
-            sc = getattr(e, "status_code", None) or getattr(e, "status", 502)
-            print("DEBUG_LLM_ERROR:", _summarize_exc(e))
-            _raise_http(int(sc) if isinstance(sc, int) else 502, f"Gemini error: {e}")
+        # except genai_errors.RateLimitError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(429, "LLM rate limit/quota exceeded")
+        # except genai_errors.AuthenticationError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(401, "Invalid or missing Gemini API key")
+        # except genai_errors.PermissionDeniedError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(403, "Gemini permission denied (project/org)")
+        # except genai_errors.InvalidRequestError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(400, f"Gemini invalid request: {e}")
+        # except genai_errors.SafetyError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(412, "Blocked by safety filters for this prompt")
+        # except genai_errors.NotFoundError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(404, "Gemini resource not found (check model name)")
+        # except genai_errors.APIConnectionError as e:
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(503, "Upstream connectivity issue reaching Gemini")
+        # except genai_errors.APIStatusError as e:
+        #     sc = getattr(e, "status_code", None) or getattr(e, "status", 502)
+        #     print("DEBUG_LLM_ERROR:", _summarize_exc(e))
+        #     _raise_http(int(sc) if isinstance(sc, int) else 502, f"Gemini error: {e}")
         except Exception as e:
             print("DEBUG_LLM_ERROR:", _summarize_exc(e))
             traceback.print_exc()
